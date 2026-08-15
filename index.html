@@ -2129,6 +2129,54 @@
             );
         };
 
+        // 来店番号を日付順で振り直す（過去来店の追加・削除後も番号を正しく保つ）
+        const renumberVisits = (vs) => [...vs].sort((a, b) => a.date < b.date ? -1 : 1).map((v, i) => ({ ...v, n: i + 1 }));
+
+        // 来店ステッパー — 1回目 → 2回目 → 3回目… の進行を可視化
+        const VisitStepper = ({ visits, today }) => {
+            const scrollRef = useRef(null);
+            const todayVisit = visits.find(v => v.date === today);
+            const steps = [
+                ...visits.map(v => ({ kind: v.date === today ? 'today' : 'done', n: v.n, date: v.date })),
+                ...(todayVisit
+                    ? [{ kind: 'future', n: visits.length + 1 }]
+                    : [{ kind: 'next', n: visits.length + 1 }, { kind: 'future', n: visits.length + 2 }]),
+            ];
+            useEffect(() => {
+                const el = scrollRef.current;
+                if (el) el.scrollLeft = el.scrollWidth;
+            }, [visits.length]);
+            const planLabel = (n) => n === 1 ? '骨盤矯正' : n === 2 ? 'コアレ・採寸' : '定期ケア';
+            return (
+                <div ref={scrollRef} className="overflow-x-auto -mx-1 px-1 pb-1" style={{ scrollbarWidth: 'none' }}>
+                    <div className="flex items-start" style={{ minWidth: 'max-content' }}>
+                        {steps.map((s, i) => (
+                            <div key={i} className="flex items-start">
+                                {i > 0 && <div style={{ width: 24, height: 1.5, background: (s.kind === 'done' || s.kind === 'today') ? '#C0B084' : '#E9D5D9', marginTop: 17 }} />}
+                                <div className="flex flex-col items-center" style={{ width: 64 }}>
+                                    <div className="flex items-center justify-center font-mincho" style={{
+                                        width: 34, height: 34, borderRadius: '50%', fontSize: 14, fontWeight: 700,
+                                        ...(s.kind === 'done' ? { background: '#904C63', color: '#fff' } :
+                                            s.kind === 'today' ? { background: 'linear-gradient(135deg,#E8837E,#C94D4D)', color: '#fff', boxShadow: '0 0 0 3px #FBEAE8' } :
+                                            s.kind === 'next' ? { background: '#fff', color: '#C94D4D', border: '2px dashed #E8837E' } :
+                                            { background: '#fff', color: '#D9BFC7', border: '1.5px dashed #E9D5D9' }),
+                                    }}>
+                                        {s.n}
+                                    </div>
+                                    <div className="text-[9px] font-bold mt-1 text-center" style={{ color: s.kind === 'today' ? '#C94D4D' : s.kind === 'next' ? '#C94D4D' : s.kind === 'done' ? '#904C63' : '#D9BFC7', lineHeight: 1.35 }}>
+                                        {s.kind === 'today' ? '本日' : s.kind === 'next' ? '次回' : `${s.n}回目`}
+                                        <div style={{ fontWeight: 500, color: s.kind === 'done' ? '#B08A96' : (s.kind === 'today' || s.kind === 'next') ? '#D98A85' : '#E0CBD2' }}>
+                                            {(s.kind === 'done' || s.kind === 'today') ? fmtDateShort(s.date).slice(5) : planLabel(s.n)}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
         // 顧客詳細 + 本日の来店フロー
         const CustomerDetailView = ({ customer, updateCustomer, onBack, onDelete, gotoTab, openCounseling, photoCount }) => {
             const visits = customer.visits || [];
@@ -2141,6 +2189,10 @@
             const daysSinceMeasure = lastMeasure ? daysBetween(lastMeasure, today) : null;
             const needsRemeasure = nextN >= 3 && (!lastMeasure || daysSinceMeasure >= 60);
             const [confirmDelete, setConfirmDelete] = useState(false);
+            const [showAddPast, setShowAddPast] = useState(false);
+            const [pastDate, setPastDate] = useState('');
+            const [pastMenu, setPastMenu] = useState('');
+            const [confirmVisitDel, setConfirmVisitDel] = useState(null);
             const counselingDone = !!(customer.counseling && customer.counseling.savedAt);
 
             const startTodayVisit = () => {
@@ -2148,7 +2200,7 @@
                 updateCustomer(customer.id, c => {
                     const vs = c.visits || [];
                     if (vs.find(v => v.date === today)) return c;
-                    return { ...c, visits: [...vs, { id: uid(), n: vs.length + 1, date: today, menu: visitPlanFor(vs.length + 1).menu, memo: '', nextAppointment: '', tasksDone: {} }] };
+                    return { ...c, visits: renumberVisits([...vs, { id: uid(), n: vs.length + 1, date: today, menu: visitPlanFor(vs.length + 1).menu, memo: '', nextAppointment: '', tasksDone: {} }]) };
                 });
             };
             const updateTodayVisit = (patch) => {
@@ -2163,8 +2215,34 @@
                 updateTodayVisit({ tasksDone: { ...(todayVisit.tasksDone || {}), [key]: !(todayVisit.tasksDone || {})[key] } });
             };
             const removeTodayVisit = () => {
-                updateCustomer(customer.id, c => ({ ...c, visits: (c.visits || []).filter(v => v.date !== today) }));
+                updateCustomer(customer.id, c => ({ ...c, visits: renumberVisits((c.visits || []).filter(v => v.date !== today)) }));
             };
+            const completeTodayVisit = () => {
+                updateTodayVisit({ completed: true });
+                hapticSuccess();
+                showToast(`${nextN}回目の来店を記録しました`, 'success');
+            };
+            const deleteVisit = (vid) => {
+                updateCustomer(customer.id, c => ({ ...c, visits: renumberVisits((c.visits || []).filter(v => v.id !== vid)) }));
+                setConfirmVisitDel(null);
+                showToast('来店記録を削除しました（回数は自動で振り直されます）', 'info');
+            };
+            const addPastVisit = () => {
+                if (!pastDate) { showToast('来店日を選択してください', 'warning'); return; }
+                if (visits.some(v => v.date === pastDate)) { showToast('その日付の来店は登録済みです', 'warning'); return; }
+                updateCustomer(customer.id, c => ({
+                    ...c,
+                    visits: renumberVisits([...(c.visits || []), { id: uid(), n: 0, date: pastDate, menu: pastMenu || '', memo: '', nextAppointment: '', tasksDone: {}, completed: true }]),
+                }));
+                setPastDate(''); setPastMenu(''); setShowAddPast(false);
+                hapticSuccess();
+                showToast('過去の来店を追加しました（回数は日付順に自動で振り直されます）', 'success');
+            };
+            const isTaskDone = (t) => !!((todayVisit && (todayVisit.tasksDone || {})[t.key]) ||
+                (t.key === 'counseling' && counselingDone) ||
+                (t.key === 'nextBooking' && todayVisit && todayVisit.nextAppointment) ||
+                (t.key === 'measurement' && measurements.some(m => m.date === today)));
+            const doneCount = todayVisit ? plan.tasks.filter(isTaskDone).length : 0;
 
             const taskAction = (key) => {
                 if (key === 'counseling') openCounseling();
@@ -2210,6 +2288,15 @@
                         </div>
                     </div>
 
+                    {/* 来店の進み方 */}
+                    <div className="dear-card p-4">
+                        <SectionTitle>来店の進み方</SectionTitle>
+                        <VisitStepper visits={visits} today={today} />
+                        <div className="text-[10px] text-plum-300 leading-relaxed mt-2 pt-2" style={{ borderTop: '1px solid #F9F2F5' }}>
+                            来店当日に「来店を開始」→ タスクを進めて「来店を完了」。次にご来店いただいた日に、<b className="text-plum-500">次の回のフローが自動で表示</b>されます（1日1来店）。
+                        </div>
+                    </div>
+
                     {/* 採寸リマインド */}
                     {needsRemeasure && (
                         <div className="rounded-2xl p-4 border-2 border-dear-300 bg-dear-50 flex items-center gap-3">
@@ -2228,7 +2315,7 @@
 
                     {/* 本日の来店フロー */}
                     <div className="dear-card p-4">
-                        <SectionTitle right={todayVisit && (
+                        <SectionTitle right={todayVisit && !todayVisit.completed && (
                             <button onClick={removeTodayVisit} className="text-[10px] text-plum-200 underline">取消</button>
                         )}>
                             本日の来店　—　{plan.title}
@@ -2241,19 +2328,63 @@
                                     {nextN === 2 && ' 2回目はコアレ → 水着に着替えて採寸 & 撮影の流れです。'}
                                     {nextN >= 3 && ' 月1〜2回の来店ペース、2〜3ヶ月ごとに採寸&撮影を行います。'}
                                 </div>
+                                <div className="rounded-xl p-3 mb-3" style={{ background: '#FDF6F5', border: '1px solid #F3DFDC' }}>
+                                    <div className="text-[10px] font-bold text-plum-500 mb-1">本日（{nextN}回目）の流れ</div>
+                                    {plan.tasks.map((t, i) => (
+                                        <div key={t.key} className="flex items-center gap-2 py-1 text-[11px] text-plum-500">
+                                            <span className="w-4 h-4 rounded-full flex items-center justify-center font-mincho flex-shrink-0" style={{ background: '#F1E2E9', color: '#904C63', fontSize: 9, fontWeight: 700 }}>{i + 1}</span>
+                                            {t.label}
+                                        </div>
+                                    ))}
+                                </div>
                                 <button onClick={startTodayVisit}
                                     className="w-full py-3 rounded-xl text-white font-bold text-sm shadow-md"
                                     style={{ background: 'linear-gradient(135deg,#E8837E,#C94D4D)' }}>
                                     本日の来店を開始する（{nextN}回目）
                                 </button>
                             </div>
+                        ) : todayVisit.completed ? (
+                            <div className="space-y-3">
+                                <div className="rounded-2xl p-4 text-center" style={{ background: '#F1E2E9' }}>
+                                    <div className="flex items-center justify-center gap-2 text-plum-700 font-bold text-sm font-mincho">
+                                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#2F9C7C" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                        本日（{todayVisit.n}回目）の来店を記録しました
+                                    </div>
+                                    <div className="text-[11px] text-plum-400 mt-1">{fmtDateJP(today)}　{todayVisit.menu || ''}</div>
+                                </div>
+                                {(() => { const np = visitPlanFor(todayVisit.n + 1); return (
+                                    <div className="rounded-xl p-3.5" style={{ background: '#FDF6F5', border: '1px solid #F3DFDC' }}>
+                                        <div className="flex items-center gap-1.5 text-[11px] font-bold text-plum-600 mb-1.5">
+                                            <Orn size={11} />次回（{todayVisit.n + 1}回目）にすること{np.menu ? `　—　${np.menu}` : ''}
+                                        </div>
+                                        {np.tasks.map((t, i) => (
+                                            <div key={t.key} className="flex items-center gap-2 py-0.5 text-[11px] text-plum-400">
+                                                <span className="w-4 h-4 rounded-full flex items-center justify-center font-mincho flex-shrink-0" style={{ background: '#F1E2E9', color: '#904C63', fontSize: 9, fontWeight: 700 }}>{i + 1}</span>
+                                                {t.label}
+                                            </div>
+                                        ))}
+                                        <div className="text-[10px] text-plum-300 mt-2">次にご来店いただいた日に、このフローが自動で表示されます。</div>
+                                    </div>
+                                ); })()}
+                                <div className="grid grid-cols-2 gap-2 items-end">
+                                    <Field label={todayVisit.nextAppointment ? '次回予約日（設定済み）' : '次回予約日（未設定）'}>
+                                        <input type="date" value={todayVisit.nextAppointment || ''} min={today}
+                                            onChange={e => updateTodayVisit({ nextAppointment: e.target.value })}
+                                            className="w-full border rounded-lg px-2.5 py-2 text-sm" />
+                                    </Field>
+                                    <button onClick={() => updateTodayVisit({ completed: false })} className="py-2 text-[11px] text-plum-300 underline text-left">
+                                        完了を取り消して編集に戻る
+                                    </button>
+                                </div>
+                            </div>
                         ) : (
                             <div className="space-y-2">
+                                <div className="flex items-center justify-between px-1 pb-1">
+                                    <span className="text-[10px] text-plum-300">タスクを進めてチェックしていきます</span>
+                                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background: '#F1E2E9', color: '#904C63' }}>{doneCount} / {plan.tasks.length} 完了</span>
+                                </div>
                                 {plan.tasks.map((t, ti) => {
-                                    const done = (todayVisit.tasksDone || {})[t.key] ||
-                                        (t.key === 'counseling' && counselingDone) ||
-                                        (t.key === 'nextBooking' && !!todayVisit.nextAppointment) ||
-                                        (t.key === 'measurement' && measurements.some(m => m.date === today));
+                                    const done = isTaskDone(t);
                                     const hasAction = ['counseling', 'photoBefore', 'measurement', 'checkRemeasure'].includes(t.key);
                                     return (
                                         <div key={t.key} className={`flex items-center gap-3 p-3 rounded-xl border transition ${done ? 'bg-dear-50 border-dear-200' : 'bg-white border-plum-100'}`}>
@@ -2294,6 +2425,11 @@
                                 <div className="rounded-xl p-3 text-[10px] leading-relaxed" style={{ background: '#FAF8F0', color: '#8C7A4C', borderLeft: '3px solid #C0B084' }}>
                                     {plan.afterNote}
                                 </div>
+                                <button onClick={completeTodayVisit}
+                                    className="w-full py-3 rounded-xl text-white font-bold text-sm shadow-md"
+                                    style={{ background: 'linear-gradient(135deg,#904C63,#663347)' }}>
+                                    本日の来店を完了する（{doneCount}/{plan.tasks.length} タスク完了）
+                                </button>
                             </div>
                         )}
                     </div>
@@ -2325,9 +2461,22 @@
 
                     {/* 来店履歴 */}
                     <div className="dear-card p-4">
-                        <SectionTitle>来店履歴</SectionTitle>
+                        <SectionTitle right={
+                            <button onClick={() => setShowAddPast(s => !s)} className="text-[10px] font-bold text-dear-600 underline">過去の来店を追加</button>
+                        }>来店履歴</SectionTitle>
+                        {showAddPast && (
+                            <div className="flex gap-2 items-end mb-3 p-3 rounded-xl" style={{ background: '#FDF6F5', border: '1px solid #F3DFDC' }}>
+                                <Field label="来店日" className="flex-1">
+                                    <input type="date" value={pastDate} max={today} onChange={e => setPastDate(e.target.value)} className="w-full border rounded-lg px-2.5 py-2 text-sm" />
+                                </Field>
+                                <Field label="メニュー" className="flex-1">
+                                    <TextInput value={pastMenu} onChange={e => setPastMenu(e.target.value)} placeholder="骨盤矯正" />
+                                </Field>
+                                <button onClick={addPastVisit} className="px-3.5 py-2.5 rounded-lg text-white text-xs font-bold flex-shrink-0" style={{ background: '#904C63' }}>追加</button>
+                            </div>
+                        )}
                         {visits.length === 0 ? (
-                            <div className="text-[11px] text-plum-300">まだ来店記録がありません。</div>
+                            <div className="text-[11px] text-plum-300">まだ来店記録がありません。{showAddPast ? '' : '紙のカルテからの引き継ぎは「過去の来店を追加」から登録できます。'}</div>
                         ) : (
                             <div className="space-y-0">
                                 {[...visits].reverse().map((v, i) => (
@@ -2340,6 +2489,16 @@
                                             {v.nextAppointment && <div className="text-[10px] text-dear-600 mt-0.5">→ 次回予約 {fmtDateShort(v.nextAppointment)}</div>}
                                         </div>
                                         {measurements.some(m => m.date === v.date) && <span className="text-[9px] px-1.5 py-0.5 rounded bg-gold-100 text-gold-600 font-bold flex-shrink-0">採寸</span>}
+                                        {confirmVisitDel === v.id ? (
+                                            <div className="flex gap-1 flex-shrink-0">
+                                                <button onClick={() => deleteVisit(v.id)} className="text-[9px] font-bold px-2 py-1 rounded text-white" style={{ background: '#D34A6A' }}>削除する</button>
+                                                <button onClick={() => setConfirmVisitDel(null)} className="text-[9px] font-bold px-2 py-1 rounded text-plum-400 bg-plum-50">戻す</button>
+                                            </div>
+                                        ) : (
+                                            <button onClick={() => setConfirmVisitDel(v.id)} className="w-5 h-5 rounded-full flex items-center justify-center text-plum-200 flex-shrink-0" title="この来店を削除">
+                                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                            </button>
+                                        )}
                                     </div>
                                 ))}
                             </div>
